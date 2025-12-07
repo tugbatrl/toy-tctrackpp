@@ -142,45 +142,46 @@ class TakipciDugumu(Node):
                         #     self.get_logger().warn(" ÇOK BÜYÜK HEDEF! Yoksayılıyor...")
                         #     continue
 
-                        
+
 
                         self.tracker.init(cv_image , init_rect)
                         self.takip_modu = True
+                        self.locked_start = self.this_time
+                        self.last_seen_time = self.locked_start
                         self.get_logger().info("iha hedefi bulundu. Takip başlatılıyor")
+
                         break
 
         else:
             # Takip devam ediyor
 
-            
-
             outputs = self.tracker.track(cv_image, self.hp)
             score = outputs['best_score']
             bbox = list(map(int, outputs['bbox']))
-            
-            # bu kısım eğer olur da yolo yanlış şeyleri parametre olarak gönderirse takip algoritması kafayı yemesin diye önlem kısmı 
-            # eğer kapkaranlıksa ve ya dümdüz duvarı takip ediyorsa takip etmeyi bırakacağız 
+
+            # bu kısım eğer olur da yolo yanlış şeyleri parametre olarak gönderirse takip algoritması kafayı yemesin diye önlem kısmı
+            # eğer kapkaranlıksa ve ya dümdüz duvarı takip ediyorsa takip etmeyi bırakacağız
             x, y, w, h = bbox
-            
+
             # Görüntü sınırlarını taşmamak için önlem (Clip)
             img_h, img_w, _ = cv_image.shape
             x = max(0, min(x, img_w))
             y = max(0, min(y, img_h))
             w = max(1, min(w, img_w - x)) # Genişlik en az 1 olsun
             h = max(1, min(h, img_h - y)) # Yükseklik en az 1 olsun
-            
+
             # 1. Kutunun içindeki resmi kesip al (ROI - Region of Interest)
             roi = cv_image[y:y+h, x:x+w]
-            
+
             # 2. İstatistikleri hesapla
             # Griye çevir (Tek kanalda işlem yapmak kolaydır)
             if roi.size > 0:
                 gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-                
+
                 # Ortalama Parlaklık (Mean) ve Varyans (StdDev)
                 mean_val = np.mean(gray_roi)
                 std_dev = np.std(gray_roi)
-                
+
 
                 # 3. KARANLIK TESTİ (Kamerayı kapatınca)
                 if mean_val < 10: # Simsiyahsa (Eşik: 10)
@@ -195,7 +196,7 @@ class TakipciDugumu(Node):
 
                 # 4. DÜZLÜK TESTİ (Duvar/Boşluk)
                 if std_dev < 10: # Görüntüde hiç detay yoksa, dümdüz renksizse
-                    
+
                     self.get_logger().warn("düz şeyler takip ediliyor. Takip Bırakıldı.")
                     self.flat_frame_count +=1
                     if self.flat_frame_count >= 5 :
@@ -203,17 +204,46 @@ class TakipciDugumu(Node):
                         self.takip_modu = False
                         return
                 else:
-                    self.dark_frame_count = 0
+                    self.flat_frame_count = 0
             # ---------------------------------------------
 
-            # Eğer buraya kadar geldiyse, görüntü sağlamdır.
+            #kitlenme sayaçları
+            self.this_time = time.time()
+            
+            time_passed = self.this_time - self.locked_start
+
+            cv2.putText(cv_image , f"geçen süre: {time_passed}" , (10, 70) ,cv2.FONT_HERSHEY_SIMPLEX , 1.0 , (0,0,0 ), 2 )
+
+
+
+
             # Skor kontrolünü de yapalım
             if score < self.KAYIP_ESIGI:
-                self.takip_modu = False
-                self.get_logger().warn(f"İha kayboldu tekrar aranıyor")
-                return
+
+                self.this_time = time.time()
+                loss_of_time = self.this_time -self.last_seen_time
+
+                if loss_of_time < self.TOLERANS_SURESI:
+                    self.get_logger().info("HEDEF KAYBEDİLDİ. BEKLENİYOR...")
+                    return
+                else:
+
+                    self.takip_modu = False
+                    self.locked_start = None
+                    self.get_logger().warn(f"İha kayboldu tekrar aranıyor")
+                    return
 
             # ... (Buradan sonrası çizim ve yayınlama kodları) ...
+
+            # 3. ÇİZİM YAP (Hakem için)
+            # Kutu çiz (Kırmızı: 0, 0, 255)
+            p1 = (bbox[0], bbox[1])
+            p2 = (bbox[0] + bbox[2], bbox[1] + bbox[3])
+            cv2.rectangle(cv_image, p1, p2, (0, 0, 255), 3)
+
+            # Yazı yaz
+            cv2.putText(cv_image, "hedef takip ediliyor", (bbox[0], bbox[1]-10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2
 
             # 3. ÇİZİM YAP (Hakem için) 
             # Kutu çiz (Kırmızı: 0, 0, 255)
