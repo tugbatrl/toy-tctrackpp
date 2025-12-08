@@ -230,7 +230,7 @@ class TakipciDugumu(Node):
         # GÖRÜNTÜYÜ HER ZAMAN YAYINLA
         debug_msg = self.bridge.cv2_to_imgmsg(cv_image, "bgr8")
         self.debug_pub.publish(debug_msg)
-
+#noluor
 def main(args=None):
     rclpy.init(args=args)
     node = TakipciDugumu()
