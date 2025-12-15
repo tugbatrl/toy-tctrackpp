@@ -16,9 +16,9 @@ from ultralytics import YOLO as yolo
 # --- DOSYA YOLLARI ---
 # Burayı senin son attığın yola göre ayarladım. 
 # Eğer hata verirse eski yolunu ('/home/tugba/Toy-iha/...') kullan.
-current_dir = '/home/tugba/Desktop/MyDocuments/Toy-iha/iha_ws/src/takip_sistemi/takip_sistemi'
 
-
+# Dosyanın olduğu yeri otomatik bulur
+current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
 
 from pysot.core.config import cfg
@@ -29,7 +29,7 @@ from pysot.utils.model_load import load_pretrain
 class TakipciDugumu(Node):
     def __init__(self):
         super().__init__('tracker_node')
-        self.get_logger().info("🦁 TCTrack++ Takip Düğümü Başlatılıyor... Sakin ol, hallediyoruz!")
+        self.get_logger().info("TCTrack++ Takip Düğümü Başlatılıyor...")
 
         # 1. ARAÇLARI HAZIRLA
         self.bridge = CvBridge()
@@ -44,20 +44,32 @@ class TakipciDugumu(Node):
         # SAYAÇLAR
         self.dark_frame_count = 0
         self.flat_frame_count = 0
+
         self.locked_start = None     # Kilitlenme başlangıcı
-        self.last_seen_time = 0      # Son görülme zamanı
-        self.this_time = 0           # Şu anki zaman
+        self.last_seen_time = 0 # Son görülme zaman
+        self.basarili_sure = 0.0 
+        self.harcanan_tolerans = 0.0
+        self.last_loop_time = time.time() # Döngü süresi hesabı için
 
         # 3. MODELLERİ YÜKLE
         self.init_tctrack()
         self.init_yolo()
 
         # 4. YAYINCILAR VE ABONE
+
+
         self.bbox_pub = self.create_publisher(Float32MultiArray, '/tracker/bbox', 10)
         self.debug_pub = self.create_publisher(Image, '/tracker/debug_image', 10)
-        self.subscription = self.create_subscription(Image, '/camera/image_raw', self.resim_geldi_callback, 10)
+
+        topic_name = topic_name = '/image_raw'
+        self.subscription = self.create_subscription(
+            Image,
+            topic_name,
+            self.resim_geldi_callback,
+            10
+        )
         
-        self.get_logger().info("✅ Sistem Hazır! Gönder gelsin...")
+        self.get_logger().info("Sistem Hazır kamera görüntüsü bekleniyor...")
 
     def init_yolo(self):
         try:
@@ -65,7 +77,7 @@ class TakipciDugumu(Node):
             yolo_path = os.path.join(current_dir, "snapshot", "best.pt")
                 
             self.detector = yolo(yolo_path)
-            self.get_logger().info("🕵️ Dedektif (YOLO) Hazır!")
+            self.get_logger().info("YOLO Hazır!")
         except Exception as e:
             self.get_logger().error(f"YOLO Hatası: {e}")
 
@@ -83,18 +95,23 @@ class TakipciDugumu(Node):
             self.tracker = TCTrackplusTracker(model)
             self.hp = [cfg.TRACK.PENALTY_K, cfg.TRACK.WINDOW_INFLUENCE, cfg.TRACK.LR]
 
-            self.get_logger().info(f"✅ TCTrack++ Yüklendi! Cihaz: {device}")
+            self.get_logger().info(f"TCTrack++ Yüklendi! Cihaz: {device}")
         except Exception as e:
-            self.get_logger().error(f"❌ TCTrack Hatası: {e}")
+            self.get_logger().error(f"TCTrack Hatası: {e}")
 
     def resim_geldi_callback(self, msg):
+
+        self.this_time = time.time()
+
+        # --- ROS MESAJINI OPENCV GÖRÜNTÜSÜNE ÇEVİR ---
         try:
             cv_image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
         except CvBridgeError as e:
             return
 
         # --- ZAMANI GÜNCELLE (EN ÖNEMLİ KISIM) ---
-        self.this_time = time.time()
+        dt = self.this_time - self.last_loop_time
+        self.last_loop_time = self.this_time
 
         # ---------------------------------------------------------
         # DURUM 1: ARAMA MODU (YOLO)
@@ -127,11 +144,12 @@ class TakipciDugumu(Node):
                         self.locked_start = self.this_time   # Kronometre Başladı!
                         self.last_seen_time = self.this_time # Şimdi gördüm!
                         
-                        self.get_logger().info("🚀 HEDEF BULUNDU! Sayaç Başlıyor...")
+                        self.get_logger().info("HEDEF BULUNDU! Sayaç Başlıyor...")
+                        self.harcanan_tolerans = 0.0
                         
                         # İlk kareyi hemen çiz (Kullanıcı görsün)
                         cv2.rectangle(cv_image, (x1, y1), (x2, y2), (0, 0, 255), 3)
-                        cv2.putText(cv_image, "LOCKED", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                        cv2.putText(cv_image, "Takip ediliyor", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                         break 
                 if self.takip_modu: break
 
@@ -139,11 +157,13 @@ class TakipciDugumu(Node):
         # DURUM 2: TAKİP MODU (TCTrack++)
         # ---------------------------------------------------------
         else:
+            
             outputs = self.tracker.track(cv_image, self.hp)
             score = outputs['best_score']
             bbox = list(map(int, outputs['bbox']))
             
-            # --- GÜVENLİK FİLTRELERİ (Karanlık / Düzlük) ---
+            # bu kısım eğer olur da yolo yanlış şeyleri parametre olarak gönderirse takip algoritması kafayı yemesin diye önlem kısmı
+            # eğer kapkaranlıksa ve ya dümdüz duvarı takip ediyorsa takip etmeyi bırakacağız
             x, y, w, h = bbox
             img_h, img_w, _ = cv_image.shape
             
@@ -163,7 +183,7 @@ class TakipciDugumu(Node):
                     self.dark_frame_count += 1
                     if self.dark_frame_count >= 5:
                         self.takip_modu = False; self.dark_frame_count = 0
-                        self.get_logger().warn("🌑 ORTAM KARANLIK - Takip Bitti"); return
+                        self.get_logger().warn("ORTAM KARANLIK - Takip Bitti"); return
                 else: self.dark_frame_count = 0
 
                 # Düzlük Testi
@@ -171,7 +191,7 @@ class TakipciDugumu(Node):
                     self.flat_frame_count += 1
                     if self.flat_frame_count >= 5:
                         self.takip_modu = False; self.flat_frame_count = 0
-                        self.get_logger().warn("🧱 HEDEF DÜZ DUVAR - Takip Bitti"); return
+                        self.get_logger().warn("HEDEF DÜZ DUVAR - Takip Bitti"); return
                 else: self.flat_frame_count = 0
 
             # ---------------------------------------------------------
@@ -204,22 +224,26 @@ class TakipciDugumu(Node):
                     # Kalın ve Büyük Yazı
                     cv2.putText(cv_image, "LOCKED SUCCESSFULLY", (bbox[0], bbox[1]-40), 
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 3)
-                    self.get_logger().info("🏆 KİLİTLENME BAŞARILI!")
+                    self.get_logger().info("KİLİTLENME BAŞARILI!")
+                    
 
             # 2. HEDEF KAYIPSA (SKOR DÜŞÜK)
             else:
                 # Ne kadar zamandır kayıp?
                 kayip_suresi = self.this_time - self.last_seen_time
+                self.harcanan_tolerans += dt
+
                 
-                if kayip_suresi < self.TOLERANS_SURESI:
+                if self.harcanan_tolerans < self.TOLERANS_SURESI:
                     # Tolerans içindeyiz, SABRET
                     cv2.putText(cv_image, "KAYIP - BEKLENIYOR...", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-                    self.get_logger().info(f"⚠️ Hedef Kayıp... ({kayip_suresi:.1f}s)")
+                    self.get_logger().info(f"Hedef Kayıp... ({self.harcanan_tolerans:.1f}s)")
                 else:
                     # Tolerans doldu, BİTİR.
                     self.takip_modu = False
                     self.locked_start = None
-                    self.get_logger().warn("🚫 HEDEF KAÇTI! Başa Dönülüyor...")
+                    self.harcanan_tolerans = 0.0
+                    self.get_logger().warn("HEDEF KAÇTI! tekrardan tespit başlatılıyor")
                     return
 
             # SONUÇLARI YAYINLA
@@ -230,7 +254,13 @@ class TakipciDugumu(Node):
         # GÖRÜNTÜYÜ HER ZAMAN YAYINLA
         debug_msg = self.bridge.cv2_to_imgmsg(cv_image, "bgr8")
         self.debug_pub.publish(debug_msg)
-#noluor
+        # ... (Kodunun en alt kısmı) ...
+        
+        # RQT YERİNE BURADAN İZLE (Burası en hızlısıdır)
+        cv2.imshow("Takip Sistemi", cv_image)
+        cv2.waitKey(1)  # Bu 1ms bekleme, görüntünün ekrana çizilmesi için ŞARTTIR.
+
+
 def main(args=None):
     rclpy.init(args=args)
     node = TakipciDugumu()
