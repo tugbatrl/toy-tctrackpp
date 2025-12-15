@@ -11,3 +11,4 @@ __pycache__/
 install/
 build/
 log/
+/.vscode
