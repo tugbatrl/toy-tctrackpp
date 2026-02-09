@@ -14,8 +14,6 @@ import time
 from ultralytics import YOLO as yolo
 
 # --- DOSYA YOLLARI ---
-# Burayı senin son attığın yola göre ayarladım. 
-# Eğer hata verirse eski yolunu ('/home/tugba/Toy-iha/...') kullan.
 
 # Dosyanın olduğu yeri otomatik bulur
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -43,7 +41,6 @@ class TakipciDugumu(Node):
         
         # SAYAÇLAR
         self.dark_frame_count = 0
-        self.flat_frame_count = 0
 
         self.locked_start = None     # Kilitlenme başlangıcı
         self.last_seen_time = 0 # Son görülme zaman
@@ -61,7 +58,8 @@ class TakipciDugumu(Node):
         self.bbox_pub = self.create_publisher(Float32MultiArray, '/tracker/bbox', 10)
         self.debug_pub = self.create_publisher(Image, '/tracker/debug_image', 10)
 
-        topic_name = topic_name = '/image_raw'
+        topic_name = '/world/default/model/rc_cessna_mono_cam_0/link/camera_link/sensor/camera/image'
+
         self.subscription = self.create_subscription(
             Image,
             topic_name,
@@ -113,6 +111,17 @@ class TakipciDugumu(Node):
         dt = self.this_time - self.last_loop_time
         self.last_loop_time = self.this_time
 
+        # Koordinatları al
+                 
+        h_img, w_img, _ = cv_image.shape
+        #sarı kutu sınırları               
+        x_baslangic = int(w_img * 0.25)
+        x_bitis = int(w_img * 0.75)
+        y_baslangic = int(h_img * 0.10)
+        y_bitis = int(h_img * 0.90)
+
+        cv2.rectangle(cv_image , (x_baslangic , y_baslangic) ,(x_bitis , y_bitis), (0,255,255) , 2)
+
         # ---------------------------------------------------------
         # DURUM 1: ARAMA MODU (YOLO)
         # ---------------------------------------------------------
@@ -124,16 +133,27 @@ class TakipciDugumu(Node):
                     conf = float(box.conf[0])
                     
                     if conf > 0.60: # %60'tan eminse
-                        # Koordinatları al
+
                         coords = box.xyxy[0].cpu().numpy()
                         x1, y1, x2, y2 = map(int, coords)
                         
                         w = x2 - x1
                         h = y2 - y1
-                        
+
                         # AŞIRI BÜYÜK HEDEF KONTROLÜ (Ekranın %90'ı ise alma)
-                        h_img, w_img, _ = cv_image.shape
                         if w > w_img * 0.9: continue
+                        
+
+                        ucak_center_x = int(x1 + (w/2))
+                        ucak_center_y = int(y1 + (h/2))
+
+                        cv2.circle(cv_image , (ucak_center_x , ucak_center_y) , 5 , (0,0,255), -1)
+
+                        ucak_buyuk_mu= (h >= (h_img * 0.07)) and ((w >= (w_img * 0.07)))
+                        ucak_icerde_mi= (x_baslangic < ucak_center_x  < x_bitis) and (y_baslangic < ucak_center_y < y_bitis)
+
+                        if not ucak_buyuk_mu or not ucak_icerde_mi: continue
+
 
                         # TCTrack Başlat
                         init_rect = (x1, y1, w, h)
@@ -149,7 +169,7 @@ class TakipciDugumu(Node):
                         
                         # İlk kareyi hemen çiz (Kullanıcı görsün)
                         cv2.rectangle(cv_image, (x1, y1), (x2, y2), (0, 0, 255), 3)
-                        cv2.putText(cv_image, "Takip ediliyor", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                        cv2.putText(cv_image, "Takip ediliyor", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255,0 ), 2)
                         break 
                 if self.takip_modu: break
 
@@ -163,7 +183,7 @@ class TakipciDugumu(Node):
             bbox = list(map(int, outputs['bbox']))
             
             # bu kısım eğer olur da yolo yanlış şeyleri parametre olarak gönderirse takip algoritması kafayı yemesin diye önlem kısmı
-            # eğer kapkaranlıksa ve ya dümdüz duvarı takip ediyorsa takip etmeyi bırakacağız
+            # eğer kapkaranlıksa  takip etmeyi bırakacağız
             x, y, w, h = bbox
             img_h, img_w, _ = cv_image.shape
             
@@ -176,7 +196,6 @@ class TakipciDugumu(Node):
             if roi.size > 0:
                 gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
                 mean_val = np.mean(gray_roi)
-                std_dev = np.std(gray_roi)
 
                 # Karanlık Testi
                 if mean_val < 10: 
@@ -186,87 +205,115 @@ class TakipciDugumu(Node):
                         self.get_logger().warn("ORTAM KARANLIK - Takip Bitti"); return
                 else: self.dark_frame_count = 0
 
-                # Düzlük Testi
-                if std_dev < 10:
-                    self.flat_frame_count += 1
-                    if self.flat_frame_count >= 5:
-                        self.takip_modu = False; self.flat_frame_count = 0
-                        self.get_logger().warn("HEDEF DÜZ DUVAR - Takip Bitti"); return
-                else: self.flat_frame_count = 0
 
             # ---------------------------------------------------------
-            # KRONOMETRE VE TOLERANS MANTIĞI (DÜZELTİLEN KISIM)
+            # KRONOMETRE VE TOLERANS MANTIĞI (FİNAL VERSİYON)
             # ---------------------------------------------------------
             
-            # 1. HEDEFİ GÖRÜYORSAK (SKOR İYİ)
+            # 1. HEDEFİ GÖRÜYORSAK (SKOR İYİ - TCTrack Takip Ediyor)
             if score >= self.KAYIP_ESIGI:
-                # KRİTİK DÜZELTME: Gördüğümüz için zamanı güncelle!
+                
+                # Tolerans sayacını sıfırla çünkü hedefi görüyoruz
+                self.harcanan_tolerans = 0.0
                 self.last_seen_time = self.this_time 
-                
-                # Eğer sayaç resetlendiyse tekrar başlat
-                if self.locked_start is None:
-                    self.locked_start = self.this_time
 
-                # Geçen Süreyi Hesapla
-                gecen_sure = self.this_time - self.locked_start
-                
-                # Ekrana Yaz
-                cv2.putText(cv_image, f"SURE: {gecen_sure:.1f}s", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
-                
-                # ÇİZİM (Kırmızı Kutu)
-                p1 = (bbox[0], bbox[1])
-                p2 = (bbox[0] + bbox[2], bbox[1] + bbox[3])
-                cv2.rectangle(cv_image, p1, p2, (0, 0, 255), 3)
-                cv2.putText(cv_image, f"TRACKING ({score:.2f})", (bbox[0], bbox[1]-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                # Görüntü Boyutları
+                h_img, w_img, _ = cv_image.shape # Bunu buradan alalım garanti olsun
 
-                # 4 SANİYE KONTROLÜ (ZAFER ANII!!!)
-                if gecen_sure >= self.KILITLENME_SURESI:
-                    # Kalın ve Büyük Yazı
-                    cv2.putText(cv_image, "LOCKED SUCCESSFULLY", (bbox[0], bbox[1]-40), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 3)
-                    self.get_logger().info("KİLİTLENME BAŞARILI!")
+            
+                # Hedef Analizi
+                ucak_center_x = int(x + (w/2))
+                ucak_center_y = int(y + (h/2))
+
+                # Şartlar
+                ucak_buyuk_mu = (h >= (h_img * 0.07)) and (w >= (w_img * 0.07))
+                ucak_icerde_mi = (x_baslangic < ucak_center_x < x_bitis) and (y_baslangic < ucak_center_y < y_bitis)
+
+                # --- SENARYO A: ŞARTLAR UYGUN (KİLİTLENME SÜRECİ) ---
+                if ucak_icerde_mi and ucak_buyuk_mu:
                     
+                    # Eğer sayaç daha önce başlamadıysa başlat
+                    if self.locked_start is None:
+                        self.locked_start = self.this_time
 
-            # 2. HEDEF KAYIPSA (SKOR DÜŞÜK)
+                    # Geçen Süreyi Hesapla
+                    gecen_sure = self.this_time - self.locked_start
+                    
+                    # Ekrana Yaz (Geri Sayım)
+                    cv2.putText(cv_image, f"LOCKING: {gecen_sure:.1f}s", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
+                    
+                    # ÇİZİM - YEŞİL KUTU (Şartlar Tamam)
+                    p1 = (bbox[0], bbox[1])
+                    p2 = (bbox[0] + bbox[2], bbox[1] + bbox[3])
+                    cv2.rectangle(cv_image, p1, p2, (0, 255, 0), 3) # Yeşil
+                    cv2.putText(cv_image, f"TRACKING ({score:.2f})", (bbox[0], bbox[1]-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+                    # 4 SANİYE KONTROLÜ (ZAFER ANI!!!)
+                    if gecen_sure >= self.KILITLENME_SURESI:
+                        cv2.putText(cv_image, "LOCKED SUCCESSFULLY", (bbox[0], bbox[1]-40), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 3) # Yeşil Yazı
+                        self.get_logger().info("KİLİTLENME BAŞARILI!")
+                
+                # --- SENARYO B: TAKİP VAR AMA ŞARTLAR YOK (DIŞARIDA VEYA KÜÇÜK) ---
+                else:
+                    # Kural ihlali var, süreyi SIFIRLA!
+                    self.locked_start = None 
+                    
+                    # Uyarı Yazısı
+                    if not ucak_buyuk_mu:
+                        durum_mesaji = "Hedefe yaklas"
+                    elif not ucak_icerde_mi:
+                        durum_mesaji = "Hedef merkez dışında"
+
+                        
+                    cv2.putText(cv_image, durum_mesaji, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+
+                    # ÇİZİM - KIRMIZI KUTU (Takip var ama kilit yok)
+                    p1 = (bbox[0], bbox[1])
+                    p2 = (bbox[0] + bbox[2], bbox[1] + bbox[3])
+                    cv2.rectangle(cv_image, p1, p2, (0, 0, 255), 2) # Kırmızı
+                    cv2.putText(cv_image, f"TRACKING - NO LOCK", (bbox[0], bbox[1]-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+
+
+            # 2. HEDEF KAYIPSA (SKOR DÜŞÜK - TCTrack Kaçırdı)
             else:
-                # Ne kadar zamandır kayıp?
-                kayip_suresi = self.this_time - self.last_seen_time
-                self.harcanan_tolerans += dt
-
+                # (Senin yazdığın kısım aynen kalıyor, orası doğruydu)
+                self.harcanan_tolerans += dt # Buradaki dt yukarıda hesaplanmalı
                 
                 if self.harcanan_tolerans < self.TOLERANS_SURESI:
-                    # Tolerans içindeyiz, SABRET
                     cv2.putText(cv_image, "KAYIP - BEKLENIYOR...", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-                    self.get_logger().info(f"Hedef Kayıp... ({self.harcanan_tolerans:.1f}s)")
+                    # Çizim yapmıyoruz çünkü kutu yok
                 else:
-                    # Tolerans doldu, BİTİR.
                     self.takip_modu = False
                     self.locked_start = None
                     self.harcanan_tolerans = 0.0
-                    self.get_logger().warn("HEDEF KAÇTI! tekrardan tespit başlatılıyor")
                     return
 
-            # SONUÇLARI YAYINLA
-            bbox_msg = Float32MultiArray()
-            bbox_msg.data = [float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])]
-            self.bbox_pub.publish(bbox_msg)
+        # --- GÖRÜNTÜYÜ GÖSTER VE YAYINLA ---
+        # 1. ROS Topic olarak bas
+        try:
+            debug_msg = self.bridge.cv2_to_imgmsg(cv_image, "bgr8")
+            self.debug_pub.publish(debug_msg)
+        except Exception:
+            pass
 
-        # GÖRÜNTÜYÜ HER ZAMAN YAYINLA
-        debug_msg = self.bridge.cv2_to_imgmsg(cv_image, "bgr8")
-        self.debug_pub.publish(debug_msg)
-        # ... (Kodunun en alt kısmı) ...
-        
-        # RQT YERİNE BURADAN İZLE (Burası en hızlısıdır)
+        # 2. Ekrana Pencere Aç (Window)
+        cv2.namedWindow("Takip Sistemi", cv2.WINDOW_NORMAL)
         cv2.imshow("Takip Sistemi", cv_image)
-        cv2.waitKey(1)  # Bu 1ms bekleme, görüntünün ekrana çizilmesi için ŞARTTIR.
+        cv2.waitKey(1)
 
 
 def main(args=None):
     rclpy.init(args=args)
     node = TakipciDugumu()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+        cv2.destroyAllWindows()
 
 if __name__ == '__main__':
     main()
