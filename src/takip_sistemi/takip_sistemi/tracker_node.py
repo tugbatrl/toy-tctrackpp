@@ -58,7 +58,7 @@ class TakipciDugumu(Node):
         self.bbox_pub = self.create_publisher(Float32MultiArray, '/tracker/bbox', 10)
         self.debug_pub = self.create_publisher(Image, '/tracker/debug_image', 10)
 
-        topic_name = '/world/default/model/rc_cessna_mono_cam_0/link/camera_link/sensor/camera/image'
+        topic_name = '/world/lawn/model/rc_cessna_mono_cam_0/link/camera_link/sensor/camera/image'
 
         self.subscription = self.create_subscription(
             Image,
@@ -114,14 +114,24 @@ class TakipciDugumu(Node):
         # Koordinatları al
                  
         h_img, w_img, _ = cv_image.shape
-        #sarı kutu sınırları               
+        
+        
+        #   Hedef vuruş alanı (görüntü merkezi)              
         x_baslangic = int(w_img * 0.25)
         x_bitis = int(w_img * 0.75)
         y_baslangic = int(h_img * 0.10)
         y_bitis = int(h_img * 0.90)
 
+        #   Hedef vuruş alanını çiziyoruz
         cv2.rectangle(cv_image , (x_baslangic , y_baslangic) ,(x_bitis , y_bitis), (0,255,255) , 2)
 
+        #   hedef vuruş alanının merkezini çiziyoruz
+        hedef_vurus_center_x = int((x_bitis + x_baslangic)/2) 
+        hedef_vurus_center_y = int((y_bitis + y_baslangic)/2)
+
+        cv2.circle(cv_image , (hedef_vurus_center_x , hedef_vurus_center_y) , 5 , (0,0,255), -1)
+
+        
         # ---------------------------------------------------------
         # DURUM 1: ARAMA MODU (YOLO)
         # ---------------------------------------------------------
@@ -190,9 +200,9 @@ class TakipciDugumu(Node):
             # Sınır Kontrolü
             x = max(0, min(x, img_w-1)); y = max(0, min(y, img_h-1))
             w = max(1, min(w, img_w - x)); h = max(1, min(h, img_h - y))
-            
+
+            #Karanlık testi (yanlış tespiti önlemek için)
             roi = cv_image[y:y+h, x:x+w]
-            
             if roi.size > 0:
                 gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
                 mean_val = np.mean(gray_roi)
@@ -224,6 +234,10 @@ class TakipciDugumu(Node):
                 # Hedef Analizi
                 ucak_center_x = int(x + (w/2))
                 ucak_center_y = int(y + (h/2))
+                cv2.circle(cv_image , (ucak_center_x , ucak_center_y) , 5 , (0,0,255), -1)
+
+                #   Uçağın merkezi ile hva arasında bir çizgi çekiyoruz
+                cv2.line(cv_image , (ucak_center_x , ucak_center_y) , (hedef_vurus_center_x , hedef_vurus_center_y), (200 , 0 , 50))
 
                 # Şartlar
                 ucak_buyuk_mu = (h >= (h_img * 0.07)) and (w >= (w_img * 0.07))
