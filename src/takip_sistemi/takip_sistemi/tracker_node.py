@@ -54,7 +54,6 @@ class TakipciDugumu(Node):
 
         # 4. YAYINCILAR VE ABONE
 
-
         self.bbox_pub = self.create_publisher(Float32MultiArray, '/tracker/bbox', 10)
         self.debug_pub = self.create_publisher(Image, '/tracker/debug_image', 10)
 
@@ -331,3 +330,8 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
+
+
+
+
+    
